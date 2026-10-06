@@ -75,12 +75,27 @@ no moving parts to break.
 5. **Test it**: Actions tab → "Job Alert" → "Run workflow". The log prints
    what it found before emailing, so you can verify without checking your inbox.
 
-## Possible extensions
+## AI relevance scoring (optional)
 
-- **AI relevance scoring**: send each posting's description to a free-tier
-  LLM API (e.g. Gemini) along with a CV/profile summary, and only forward
-  postings above a relevance threshold — turning keyword matching into actual
-  semantic filtering.
+By default this does plain keyword matching. Setting these three additional
+secrets turns on an AI scoring step: each job's description is sent to
+Gemini's free API along with a short summary of your background, which rates
+fit from 0–10. Only postings at or above the threshold get emailed, and each
+listed job shows its score.
+
+| Secret | Purpose |
+|---|---|
+| `GEMINI_API_KEY` | From [aistudio.google.com](https://aistudio.google.com) — free tier, no card required |
+| `CV_SUMMARY` | A few sentences describing your background/skills/interests |
+| `RELEVANCE_THRESHOLD` | Minimum score 0–10 to include a job (default: 6) |
+
+Leave these three unset and the agent behaves exactly as before — keyword
+matching only. If scoring a particular job fails (network hiccup, etc.), that
+job is included rather than silently dropped, so a transient API error never
+causes a missed opportunity.
+
+## Other possible extensions
+
 - **Multi-source aggregation**: this pattern (fetch → filter → notify)
   generalizes to any API with a timestamp field — RSS feeds, other job
   boards, GitHub release feeds, etc.

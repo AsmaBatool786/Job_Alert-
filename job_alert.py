@@ -31,7 +31,21 @@ LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "36"))
 RESEND_API_KEY = os.environ["RESEND_API_KEY"]
 TO_EMAIL = os.environ["TO_EMAIL"]
 
+# --- Optional AI relevance scoring ---
+# If GEMINI_API_KEY is unset, this step is skipped entirely and every
+# keyword match is emailed, same as before. Set it to enable scoring.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+# A short summary of your background/skills, used to judge fit. Required
+# only if GEMINI_API_KEY is set.
+CV_SUMMARY = os.environ.get("CV_SUMMARY", "")
+# Minimum score (0-10) a job must get to be included, when scoring is on.
+RELEVANCE_THRESHOLD = int(os.environ.get("RELEVANCE_THRESHOLD", "6"))
+
 API_URL = "https://jobsearch.api.jobtechdev.se/search"
+GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    "gemini-2.0-flash:generateContent"
+)
 
 
 def fetch_jobs_for_keyword(keyword: str) -> list[dict]:
@@ -56,6 +70,48 @@ def is_recent(hit: dict, cutoff: datetime) -> bool:
     return pub_dt >= cutoff
 
 
+def score_job_relevance(cv_summary: str, hit: dict) -> int | None:
+    """
+    Asks Gemini to rate 0-10 how well this job fits the given CV summary.
+    Returns None if scoring fails for any reason (network, parsing, etc.) —
+    callers should treat None as "couldn't score, include it to be safe."
+    """
+    title = hit.get("headline", "")
+    employer = (hit.get("employer") or {}).get("name", "")
+    description = (hit.get("description") or {}).get("text", "")[:2000]
+
+    prompt = (
+        "You are screening job postings for a candidate. Given the "
+        "candidate's background and a job posting, respond with ONLY a "
+        "single integer from 0 to 10 rating how relevant this job is to "
+        "the candidate's background and stated interests — no words, no "
+        "punctuation, just the number.\n\n"
+        f"CANDIDATE BACKGROUND:\n{cv_summary}\n\n"
+        f"JOB POSTING:\nTitle: {title}\nEmployer: {employer}\n"
+        f"Description: {description}"
+    )
+
+    try:
+        resp = requests.post(
+            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        # Model sometimes wraps the number in stray characters despite instructions;
+        # pull out the first run of digits defensively.
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if not digits:
+            return None
+        score = int(digits[:2])  # cap accidental multi-digit concatenation
+        return max(0, min(10, score))
+    except Exception as exc:
+        print(f"  (scoring failed for '{title}': {exc})", file=sys.stderr)
+        return None
+
+
 def collect_new_jobs() -> list[dict]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     seen_ids = set()
@@ -71,7 +127,22 @@ def collect_new_jobs() -> list[dict]:
             seen_ids.add(job_id)
             results.append(hit)
 
-    results.sort(key=lambda h: h.get("publication_date", ""), reverse=True)
+    if GEMINI_API_KEY and CV_SUMMARY:
+        scored = []
+        for hit in results:
+            score = score_job_relevance(CV_SUMMARY, hit)
+            hit["_relevance_score"] = score
+            # Keep it if scoring failed (be inclusive on error) or it meets the bar.
+            if score is None or score >= RELEVANCE_THRESHOLD:
+                scored.append(hit)
+        results = scored
+        results.sort(
+            key=lambda h: (h.get("_relevance_score") is not None, h.get("_relevance_score", 0)),
+            reverse=True,
+        )
+    else:
+        results.sort(key=lambda h: h.get("publication_date", ""), reverse=True)
+
     return results
 
 
@@ -86,6 +157,9 @@ def format_job(hit: dict) -> str:
     url = hit.get("webpage_url", "")
 
     lines = [f"{title} — {employer}", f"{location}"]
+    score = hit.get("_relevance_score")
+    if score is not None:
+        lines.append(f"Relevance: {score}/10")
     if deadline:
         lines.append(f"Apply by: {deadline}")
     lines.append(url)
