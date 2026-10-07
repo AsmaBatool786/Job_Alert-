@@ -44,7 +44,7 @@ RELEVANCE_THRESHOLD = int(os.environ.get("RELEVANCE_THRESHOLD", "6"))
 API_URL = "https://jobsearch.api.jobtechdev.se/search"
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.5-flash:generateContent"
+    "gemini-3.8-flash:generateContent"
 )
 
 
