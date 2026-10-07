@@ -11,6 +11,7 @@ see README.md).
 
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -91,25 +92,43 @@ def score_job_relevance(cv_summary: str, hit: dict) -> int | None:
         f"Description: {description}"
     )
 
-    try:
-        resp = requests.post(
-            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            timeout=20,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        # Model sometimes wraps the number in stray characters despite instructions;
-        # pull out the first run of digits defensively.
-        digits = "".join(ch for ch in text if ch.isdigit())
-        if not digits:
-            return None
-        score = int(digits[:2])  # cap accidental multi-digit concatenation
-        return max(0, min(10, score))
-    except Exception as exc:
-        print(f"  (scoring failed for '{title}': {exc})", file=sys.stderr)
-        return None
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        # Thinking mode is overkill for a single-number rating and burns
+        # through free-tier quota much faster — turn it off.
+        "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}},
+    }
+
+    last_exc = None
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+                json=payload,
+                timeout=30,
+            )
+            if resp.status_code in (429, 503):
+                # Rate limited or momentarily overloaded — back off and retry.
+                wait = 5 * (attempt + 1)
+                print(f"  ({title}: got {resp.status_code}, retrying in {wait}s)", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            # Model sometimes wraps the number in stray characters despite instructions;
+            # pull out the first run of digits defensively.
+            digits = "".join(ch for ch in text if ch.isdigit())
+            if not digits:
+                return None
+            score = int(digits[:2])  # cap accidental multi-digit concatenation
+            return max(0, min(10, score))
+        except Exception as exc:
+            last_exc = exc
+            time.sleep(2)
+
+    print(f"  (scoring failed for '{title}': {last_exc})", file=sys.stderr)
+    return None
 
 
 def collect_new_jobs() -> list[dict]:
@@ -129,7 +148,9 @@ def collect_new_jobs() -> list[dict]:
 
     if GEMINI_API_KEY and CV_SUMMARY:
         scored = []
-        for hit in results:
+        for i, hit in enumerate(results):
+            if i > 0:
+                time.sleep(4)  # pace requests to stay under free-tier rate limits
             score = score_job_relevance(CV_SUMMARY, hit)
             hit["_relevance_score"] = score
             # Keep it if scoring failed (be inclusive on error) or it meets the bar.
